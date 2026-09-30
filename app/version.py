@@ -1,0 +1,4 @@
+APP_NAME = "Glean"
+APP_VERSION = "2.0.0"
+APP_VERSION_WIN = "2.0.0.0"
+APP_AUTHOR = "Nostrand"

@@ -1,0 +1,205 @@
+/* Glean — PySide6 dark theme aligned with Quaint. */
+* {
+    font-family: "Segoe UI", "Inter", sans-serif;
+    font-size: 10pt;
+    color: #e6e6ec;
+}
+QMainWindow, QWidget#root {
+    background-color: #17171c;
+}
+QMenuBar {
+    background-color: #17171c;
+    border-bottom: 1px solid #26262e;
+    padding: 2px;
+}
+QMenuBar::item {
+    padding: 6px 10px;
+    background: transparent;
+    border-radius: 6px;
+}
+QMenuBar::item:selected { background-color: #2a2a34; }
+QMenu {
+    background-color: #1c1c24;
+    color: #e6e6ec;
+    border: 1px solid #2a2a34;
+    border-radius: 8px;
+    padding: 6px;
+}
+QMenu::item {
+    color: #e6e6ec;
+    background-color: transparent;
+    padding: 7px 28px 7px 12px;
+    border-radius: 6px;
+}
+QMenu::item:selected { background-color: #f40000; color: #ffffff; }
+QMenu::separator { height: 1px; background: #2a2a34; margin: 6px 4px; }
+QFrame#mainCard {
+    background-color: #1c1c24;
+    border: 1px solid #2a2a34;
+    border-radius: 16px;
+}
+QLabel#titleLabel { font-size: 24pt; font-weight: 700; color: #ffffff; }
+QLabel#subtitleLabel { color: #8d8d9a; font-size: 11pt; }
+QLabel#queueLabel {
+    color: #ff5a5a;
+    font-size: 9pt;
+    font-weight: 600;
+}
+
+QLabel#downloadTypeLabel { color: #9a9aa8; font-size: 9pt; font-weight: 600; }
+QLabel#fileNameLabel { font-size: 12pt; font-weight: 600; color: #e6e6ec; }
+QLabel#statusLabel { font-size: 11pt; font-weight: 600; }
+QLabel#statusLabel[statusKind="working"] { color: #77b7ff; }
+QLabel#statusLabel[statusKind="success"] { color: #62d28f; }
+QLabel#statusLabel[statusKind="warning"] { color: #e5ad56; }
+QLabel#statusLabel[statusKind="error"] { color: #ff6565; }
+QLineEdit {
+    background-color: #14141a;
+    border: 1px solid #2a2a34;
+    border-radius: 9px;
+    padding: 10px 12px;
+    selection-background-color: #f40000;
+    selection-color: #ffffff;
+}
+QLineEdit:focus { border: 1px solid #f40000; }
+QLineEdit#urlEntry { min-height: 30px; font-size: 11pt; }
+QPushButton {
+    background-color: #292932;
+    border: none;
+    border-radius: 8px;
+    padding: 9px 15px;
+    font-weight: 600;
+}
+QPushButton:hover { background-color: #373741; }
+QPushButton:pressed { background-color: #f40000; color: #ffffff; }
+QPushButton#downloadButton {
+    background-color: #d90000;
+    border: 1px solid #ff3030;
+    color: #ffffff;
+    font-size: 15pt;
+    font-weight: 700;
+    border-radius: 12px;
+}
+QPushButton#downloadButton:hover { background-color: #f40000; }
+QPushButton#downloadButton:pressed { background-color: #b80000; }
+QCheckBox { spacing: 8px; }
+QCheckBox::indicator { width: 18px; height: 18px; border-radius: 5px; border: 1px solid #4a4a56; background: #14141a; }
+QCheckBox::indicator:hover { border-color: #f40000; }
+QCheckBox::indicator:checked { background: #f40000; border-color: #f40000; }
+QComboBox {
+    background-color: #26262e;
+    border: 1px solid #30303a;
+    border-radius: 8px;
+    padding: 7px 10px;
+    min-width: 160px;
+}
+QComboBox:hover { background-color: #33333e; }
+QComboBox QAbstractItemView {
+    background-color: #1c1c24;
+    border: 1px solid #2a2a34;
+    selection-background-color: #f40000;
+    outline: none;
+}
+QProgressBar {
+    background: #26262e;
+    border: none;
+    border-radius: 5px;
+    min-height: 10px;
+    max-height: 10px;
+}
+QProgressBar::chunk { background: #f40000; border-radius: 5px; }
+QDialog, QMessageBox { background-color: #1c1c24; }
+QToolTip { background-color: #1c1c24; color: #e6e6ec; border: 1px solid #2a2a34; padding: 4px 8px; }
+*:disabled { color: #686875; }
+QPushButton:disabled { color: #55555f; background-color: #1c1c22; }
+QMenu::item:disabled, QMenuBar::item:disabled { color: #686875; background: transparent; }
+
+QLabel#directoryPathLabel {
+    background-color: #14141a;
+    border: 1px solid #2a2a34;
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: #cfcfd8;
+}
+
+
+QPushButton#headerButton {
+    background-color: #24242d;
+    border: 1px solid #343440;
+    padding: 0;
+}
+QPushButton#headerButton:hover { border-color: #f40000; background-color: #2f2f39; }
+QWidget#historyRow {
+    background-color: #18181f;
+    border: 1px solid #2a2a34;
+    border-radius: 8px;
+}
+QLabel#historyHeader { font-size: 13pt; font-weight: 700; }
+QLabel#secondaryLabel { color: #8d8d9a; }
+QScrollArea { background: transparent; border: none; }
+QScrollArea > QWidget > QWidget { background: transparent; }
+
+/* Clipboard URL monitor prompt */
+QFrame#clipboardPopup {
+    background-color: #1c1c24;
+    border: 1px solid #343440;
+    border-radius: 12px;
+}
+QLabel#clipboardPopupTitle {
+    color: #ffffff;
+    font-size: 11pt;
+    font-weight: 700;
+}
+QLabel#clipboardPopupUrl {
+    color: #9a9aa8;
+    font-size: 9pt;
+}
+QLabel#clipboardPopupMediaLabel {
+    color: #d2d2da;
+    font-size: 9pt;
+    font-weight: 600;
+}
+QRadioButton#clipboardPopupMediaOption { spacing: 7px; color: #f0f0f4; }
+QRadioButton#clipboardPopupMediaOption::indicator {
+    width: 17px;
+    height: 17px;
+    border-radius: 9px;
+    border: 1px solid #4a4a56;
+    background: #14141a;
+}
+QRadioButton#clipboardPopupMediaOption::indicator:hover { border-color: #f40000; }
+QRadioButton#clipboardPopupMediaOption::indicator:checked {
+    background: #f40000;
+    border: 1px solid #ff3b3b;
+}
+QRadioButton#clipboardPopupMediaOption:disabled { color: #666672; }
+QPushButton#clipboardPopupAccept {
+    background-color: #d90000;
+    border: 1px solid #ff3030;
+    color: #ffffff;
+    min-width: 72px;
+}
+QPushButton#clipboardPopupAccept:hover { background-color: #f40000; }
+QPushButton#clipboardPopupCancel { min-width: 78px; }
+
+/* Integrated GitHub updater */
+QLabel#updateHeading {
+    color: #ffffff;
+    font-size: 15pt;
+    font-weight: 700;
+}
+QLabel#updateStatusLabel {
+    color: #d4d4dc;
+    font-size: 10pt;
+    min-height: 38px;
+}
+QPushButton#primaryButton {
+    background-color: #d90000;
+    border: 1px solid #ff3030;
+    color: #ffffff;
+}
+QPushButton#primaryButton:hover { background-color: #f40000; }
+QDialog#updateDialog QProgressBar {
+    min-height: 12px;
+    max-height: 12px;
+}
