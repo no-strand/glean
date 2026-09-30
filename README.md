@@ -4,7 +4,7 @@ Glean é um aplicativo para Windows feito para baixar vídeos, áudios e postage
 
 ---
 
-## recursos
+## Recursos
 
 -  **Baixe vídeos e áudios do YouTube**
 -  **Suporte a playlists do YouTube**
