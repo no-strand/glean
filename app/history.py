@@ -60,11 +60,26 @@ class HistoryStore:
         with self._lock:
             self._ensure_loaded()
             assert self._entries is not None
+            if not title:
+                title = next((item.get("title", "") for item in self._entries if item.get("url") == url), "")
             self._entries = [item for item in self._entries if item.get("url") != url]
             stamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
             self._entries.insert(0, {"url": url, "title": title, "timestamp": stamp})
             del self._entries[self.MAX_ENTRIES :]
             self._dirty = True
+
+    def update_title(self, url: str, title: str) -> None:
+        """Enrich an existing attempt without changing its timestamp or order."""
+        title = " ".join(str(title or "").split()).strip()
+        if not title:
+            return
+        with self._lock:
+            self._ensure_loaded()
+            for item in self._entries or []:
+                if item["url"] == url and item["title"] != title:
+                    item["title"] = title
+                    self._dirty = True
+                    break
 
     def clear(self) -> None:
         with self._lock:

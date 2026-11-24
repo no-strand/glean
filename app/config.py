@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .i18n import DEFAULT_LOCALE
+from .image_conversion import IMAGE_FORMATS
 from .version import APP_NAME
 
 
@@ -17,6 +18,23 @@ class AppConfig:
     download_thumbnails: bool = False
     language: str = DEFAULT_LOCALE
     start_with_windows: bool = False
+    preferred_av: str = "video"
+    preferred_image_format: str = "original"
+    preferred_playlist_scope: str = "single"
+    preferred_mixed_media: str = "video"
+
+    def remember_download_choice(self, media_type: str, playlist_scope: str | None = None) -> None:
+        """Remember confirmed choices without resetting unrelated media preferences."""
+        if media_type in ("video", "audio"):
+            self.preferred_av = media_type
+            self.preferred_mixed_media = media_type
+        elif media_type.startswith("image:") and media_type.split(":", 1)[1] in IMAGE_FORMATS:
+            self.preferred_image_format = media_type.split(":", 1)[1]
+            self.preferred_mixed_media = "image"
+        else:
+            return
+        if playlist_scope in ("single", "playlist"):
+            self.preferred_playlist_scope = playlist_scope
 
 
 class ConfigStore:
@@ -80,6 +98,11 @@ class ConfigStore:
         thumbnails = self._bool_value(section.get("Download_Thumbnails", False), False)
         language = str(section.get("Language", DEFAULT_LOCALE) or DEFAULT_LOCALE)
         start_with_windows = self._bool_value(section.get("Start_With_Windows", False), False)
+        def choice(key, allowed, default):
+            value = str(section.get(key, default)).strip().lower()
+            return value if value in allowed else default
+
+        preferred_av = choice("Preferred_AV", ("video", "audio"), "video")
         config = AppConfig(
             video_quality=video_quality,
             audio_quality=audio_quality,
@@ -87,6 +110,10 @@ class ConfigStore:
             download_thumbnails=thumbnails,
             language=language,
             start_with_windows=start_with_windows,
+            preferred_av=preferred_av,
+            preferred_image_format=choice("Preferred_Image_Format", IMAGE_FORMATS, "original"),
+            preferred_playlist_scope=choice("Preferred_Playlist_Scope", ("single", "playlist"), "single"),
+            preferred_mixed_media=choice("Preferred_Mixed_Media", ("video", "audio", "image"), preferred_av),
         )
         if needs_path_migration:
             try:
@@ -108,6 +135,10 @@ class ConfigStore:
             "Download_Thumbnails": "true" if config.download_thumbnails else "false",
             "Language": config.language,
             "Start_With_Windows": "true" if config.start_with_windows else "false",
+            "Preferred_AV": config.preferred_av,
+            "Preferred_Image_Format": config.preferred_image_format,
+            "Preferred_Playlist_Scope": config.preferred_playlist_scope,
+            "Preferred_Mixed_Media": config.preferred_mixed_media,
         }
         tmp = self.path.with_suffix(".tmp")
         with tmp.open("w", encoding="utf-8") as handle:

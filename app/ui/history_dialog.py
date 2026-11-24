@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+from html import escape
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..i18n import tr
+from ..message_boxes import critical
 
 
 class HistoryDialog(QDialog):
@@ -76,13 +78,12 @@ class HistoryDialog(QDialog):
         h.setContentsMargins(12, 9, 10, 9)
         h.setSpacing(10)
         text_box = QVBoxLayout()
-        label = QLabel(url)
-        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        label.setWordWrap(True)
-        text_box.addWidget(label)
+        text_box.addWidget(self._make_url_label(url))
         formatted_date = self._format_timestamp(timestamp)
         metadata = f"{title} - {formatted_date}" if title and formatted_date else (title or formatted_date)
-        date_label = QLabel(metadata)
+        date_label = QLabel()
+        date_label.setTextFormat(Qt.TextFormat.PlainText)
+        date_label.setText(metadata)
         date_label.setObjectName("secondaryLabel")
         date_label.setWordWrap(True)
         text_box.addWidget(date_label)
@@ -92,6 +93,45 @@ class HistoryDialog(QDialog):
         copy_button.clicked.connect(lambda _=False, value=url: QGuiApplication.clipboard().setText(value))
         h.addWidget(copy_button)
         self.rows.addWidget(row)
+
+    @staticmethod
+    def _browser_url(url: str) -> QUrl | None:
+        """Only web URLs may be opened from persisted history entries."""
+        if any(ord(char) < 32 or ord(char) == 127 for char in url):
+            return None
+        target = QUrl(url, QUrl.ParsingMode.StrictMode)
+        if (
+            not target.isValid()
+            or target.scheme().lower() not in ("http", "https")
+            or not target.host()
+            or target.userInfo()
+        ):
+            return None
+        return target
+
+    def _make_url_label(self, url: str) -> QLabel:
+        label = QLabel()
+        label.setWordWrap(True)
+        if self._browser_url(url) is None:
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            label.setText(url)
+            return label
+
+        safe_url = escape(url, quote=True)
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        label.setOpenExternalLinks(False)
+        label.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        label.setText(f'<a href="{safe_url}" style="color: #77b7ff; text-decoration: underline;">{safe_url}</a>')
+        label.setToolTip(tr("history.open_link"))
+        label.linkActivated.connect(lambda _href, value=url: self._open_history_url(value))
+        return label
+
+    def _open_history_url(self, url: str) -> None:
+        target = self._browser_url(url)
+        if target is not None and not QDesktopServices.openUrl(target):
+            critical(self, tr("history.title"), tr("history.open_failed"))
 
     @staticmethod
     def _format_timestamp(value: str) -> str:

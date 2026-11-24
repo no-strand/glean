@@ -3,3 +3,5 @@ yt-dlp>=2026.8.19
 gallery-dl>=1.32.14,<2
 pyinstaller>=6.20
 pyinstaller-hooks-contrib>=2026.0
+
+Pillow>=10.4,<13

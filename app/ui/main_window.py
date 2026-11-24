@@ -27,7 +27,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import ConfigStore
-from ..platforms import classify_url, is_youtube_playlist
+from ..platforms import classify_url, is_youtube_playlist, youtube_single_video_url, facebook_media_kind, media_kind
+from ..image_conversion import IMAGE_FORMATS
 from ..history import HistoryStore
 from ..i18n import available_locales, set_locale, tr
 from ..message_boxes import information
@@ -38,6 +39,7 @@ from ..version import APP_AUTHOR, APP_NAME, APP_VERSION
 
 class MainWindow(QMainWindow):
     clipboard_title_resolved = Signal(str, str)
+    media_kind_resolved = Signal(str, str)
 
     def __init__(self, resource_dir: str, config_store: ConfigStore | None = None) -> None:
         super().__init__()
@@ -63,13 +65,14 @@ class MainWindow(QMainWindow):
         self._history_save_pending = False
         self._clipboard = None
         self._clipboard_popup = None
-        self._last_clipboard_text = ""
         self._clipboard_download_queue: list[dict[str, object]] = []
         self._active_download_urls: set[str] = set()
         self._cancel_all_requested = False
         self._clipboard_title_cache: dict[str, str] = {}
         self._clipboard_title_inflight: set[str] = set()
+        self._manual_download_plan: dict[str, object] | None = None
         self.clipboard_title_resolved.connect(self._on_clipboard_title_resolved)
+        self.media_kind_resolved.connect(self._on_media_kind_resolved)
 
         self.setMinimumSize(850, 650)
         icon = os.path.join(self.resource_dir, "icon.ico")
@@ -198,7 +201,8 @@ class MainWindow(QMainWindow):
         type_row.addStretch(1)
         self.video_check = QCheckBox()
         self.audio_check = QCheckBox()
-        self.video_check.setChecked(True)
+        self.video_check.setChecked(self.config.preferred_av == "video")
+        self.audio_check.setChecked(self.config.preferred_av == "audio")
         self.video_check.toggled.connect(self._on_video_toggled)
         self.audio_check.toggled.connect(self._on_audio_toggled)
         type_row.addWidget(self.video_check)
@@ -352,17 +356,30 @@ class MainWindow(QMainWindow):
         self._clipboard = clipboard
         # Do not alert for a URL that was already on the clipboard before
         # Glean started; only react to subsequent clipboard changes.
-        self._last_clipboard_text = clipboard.text().strip()
         clipboard.dataChanged.connect(self._on_clipboard_changed)
 
     @Slot()
     def _on_clipboard_changed(self) -> None:
         if self._clipboard is None:
             return
+        # Both Copy and Cut change the system clipboard. Do not permanently
+        # suppress an identical URL: a new clipboard event is a new request.
         text = self._clipboard.text().strip()
-        if not text or text == self._last_clipboard_text:
+        if classify_url(text) is None:
+            # Some applications expose links as URI-list rather than plain text.
+            mime = self._clipboard.mimeData()
+            if mime is not None and mime.hasUrls():
+                urls = mime.urls()
+                if len(urls) == 1:
+                    candidate = urls[0].toString().strip()
+                    if classify_url(candidate) is not None:
+                        text = candidate
+        if not text:
             return
-        self._last_clipboard_text = text
+        if self._manual_download_plan is not None:
+            # A manual playlist decision must not be replaced by a new
+            # clipboard notification while the user is choosing.
+            return
 
         # Keep monitoring while a worker is active. Supported URLs can be
         # confirmed and queued for sequential download instead of being lost.
@@ -370,9 +387,15 @@ class MainWindow(QMainWindow):
             if self._clipboard_popup is not None:
                 self._clipboard_popup.hide()
             return
+        # Repeated notifications must not reset choices in an open popup.
+        if (self._clipboard_popup is not None and self._clipboard_popup.isVisible()
+                and self._clipboard_popup.original_url == text):
+            return
         self._show_clipboard_download_prompt(text)
 
-    def _show_clipboard_download_prompt(self, url: str) -> None:
+    def _show_clipboard_download_prompt(
+        self, url: str, *, manual: bool = False, allow_audio_override: bool | None = None,
+    ) -> None:
         platform_key = classify_url(url)
         if platform_key is None:
             return
@@ -381,18 +404,34 @@ class MainWindow(QMainWindow):
 
             popup = ClipboardDownloadPopup()
             popup.download_requested.connect(self._download_clipboard_url)
+            popup.cancelled.connect(self._on_popup_cancelled)
             self._clipboard_popup = popup
-        allow_audio = platform_key == "yt"
-        default_media_type = "audio" if allow_audio and self.audio_check.isChecked() else "video"
+        allow_audio = media_kind(url) != "image"
+        if allow_audio_override is not None:
+            allow_audio = allow_audio and allow_audio_override
+        default_media_type = self.config.preferred_av if allow_audio else "video"
         display_title = self._clipboard_title_cache.get(url) or self._clipboard_fallback_title(url)
         self._clipboard_popup.show_for_url(
             url,
-            queue_mode=self._is_downloading or bool(self._clipboard_download_queue),
+            queue_mode=not manual and (self._is_downloading or bool(self._clipboard_download_queue)),
             default_media_type=default_media_type,
             allow_audio=allow_audio,
             display_title=display_title,
+            default_image_format=self.config.preferred_image_format,
+            default_playlist_scope=self.config.preferred_playlist_scope,
+            default_mixed_media=self.config.preferred_mixed_media,
         )
         self._request_clipboard_title(url)
+        if media_kind(url) == "unknown":
+            def probe():
+                from ..downloader import probe_media_kind
+                self.media_kind_resolved.emit(url, probe_media_kind(url))
+            threading.Thread(target=probe, daemon=True, name="GleanMediaProbe").start()
+
+    @Slot(str, str)
+    def _on_media_kind_resolved(self, url: str, kind: str) -> None:
+        if self._clipboard_popup is not None and self._clipboard_popup.isVisible():
+            self._clipboard_popup.set_media_kind(url, kind)
 
     def _clipboard_fallback_title(self, url: str) -> str:
         platform_key = classify_url(url)
@@ -404,6 +443,8 @@ class MainWindow(QMainWindow):
             return tr("download.type.tiktok")
         if platform_key == "x":
             return tr("download.type.x")
+        if platform_key == "fb":
+            return tr("download.type.facebook_" + facebook_media_kind(url))
         return APP_NAME
 
     def _request_clipboard_title(self, url: str) -> None:
@@ -438,20 +479,26 @@ class MainWindow(QMainWindow):
         if platform_key is None:
             return None
 
-        # Audio extraction is supported only by YouTube. The media selection
-        # from the clipboard popup is stored in the queued job itself.
-        if platform_key == "yt" and requested_media_type == "audio":
+        # The media selection and format are stored in the queued job itself.
+        if media_kind(url) == "image" and not (requested_media_type or "").startswith("image:"):
+            return None
+        if requested_media_type and requested_media_type.startswith("image:"):
+            media_type = "image"
+            quality = requested_media_type.split(":", 1)[1]
+            if quality not in IMAGE_FORMATS or media_kind(url) == "video":
+                return None
+        elif requested_media_type == "audio" and media_kind(url) != "image":
             media_type = "audio"
             quality = self.config.audio_quality
         else:
-            media_type = "video"
+            media_type = "video" if platform_key == "yt" else "video_only"
             quality = self.config.video_quality
 
         return {
             "url": url,
             "media_type": media_type,
             "quality": quality,
-            "thumbnails": bool(self.config.download_thumbnails),
+            "thumbnails": bool(self.config.download_thumbnails) and media_type != "image",
         }
 
     def _queued_urls(self) -> set[str]:
@@ -479,8 +526,6 @@ class MainWindow(QMainWindow):
         self.file_name_label.clear()
         self.url_entry.setPlaceholderText(tr("input.url_placeholder"))
         self.url_entry.setText(url)
-        self.video_check.setChecked(media_type == "video")
-        self.audio_check.setChecked(media_type == "audio")
         self._update_download_type_label([url])
         self._start_download([url], media_type, quality, thumbnails)
 
@@ -492,14 +537,40 @@ class MainWindow(QMainWindow):
         self._start_clipboard_job(job)
         return True
 
+    def _remember_popup_choice(self, url: str, media_type: str) -> None:
+        original = self._clipboard_popup.original_url
+        single = youtube_single_video_url(original)
+        scope = ("single" if url == single else "playlist") if single else None
+        self.config.remember_download_choice(media_type, scope)
+        # Reflect the latest confirmed audio/video choice, not the media type
+        # of an older queued job that happens to start later.
+        if media_type in ("video", "audio"):
+            for check, selected in ((self.video_check, media_type == "video"),
+                                    (self.audio_check, media_type == "audio")):
+                blocked = check.blockSignals(True)
+                check.setChecked(selected)
+                check.blockSignals(blocked)
+        self._save_config()
+
     @Slot(str, str)
     def _download_clipboard_url(self, url: str, media_type: str) -> None:
         job = self._clipboard_job(url, media_type)
         if job is None:
+            if self._manual_download_plan is not None:
+                self._manual_download_plan = None
+                self._set_status(tr("error.invalid_media_type"), "error")
+            return
+        self._remember_popup_choice(url, media_type)
+        if self._manual_download_plan is not None:
+            if "jobs" in self._manual_download_plan:
+                self._resolve_media_job(url, media_type)
+                return
+            self._resolve_manual_playlist_choice(url, media_type)
             return
         if url in self._active_download_urls or url in self._queued_urls():
             return
 
+        self._record_download_attempts([url])
         if self._is_downloading or self._clipboard_download_queue:
             self._clipboard_download_queue.append(job)
             self._update_queue_label()
@@ -515,6 +586,9 @@ class MainWindow(QMainWindow):
             self.audio_check.blockSignals(True)
             self.audio_check.setChecked(False)
             self.audio_check.blockSignals(False)
+        if checked:
+            self.config.remember_download_choice("video")
+            self._save_config()
 
     @Slot(bool)
     def _on_audio_toggled(self, checked: bool) -> None:
@@ -522,9 +596,17 @@ class MainWindow(QMainWindow):
             self.video_check.blockSignals(True)
             self.video_check.setChecked(False)
             self.video_check.blockSignals(False)
+        if checked:
+            self.config.remember_download_choice("audio")
+            self._save_config()
 
     @Slot(str)
     def _on_url_edited(self, text: str) -> None:
+        if self._manual_download_plan is not None:
+            # Editing the URL invalidates any playlist confirmation for the old URL.
+            self._manual_download_plan = None
+            if self._clipboard_popup is not None:
+                self._clipboard_popup.hide()
         if self._pending_urls:
             self._pending_urls.clear()
             self._loaded_list_path = None
@@ -548,6 +630,8 @@ class MainWindow(QMainWindow):
             return "download.type.tiktok"
         if platform_key == "x":
             return "download.type.x"
+        if platform_key == "fb":
+            return "download.type.facebook_" + facebook_media_kind(url)
         return None
 
     def _update_download_type_label(self, urls: list[str]) -> None:
@@ -611,9 +695,16 @@ class MainWindow(QMainWindow):
             self._schedule_history_save()
             self._set_status(tr("history.cleared"), "success")
 
+    def _record_download_attempts(self, urls: list[str]) -> None:
+        # Persist the entire accepted batch before starting or queuing any work.
+        for url in urls:
+            if classify_url(url) is not None:
+                self.history_store.add(url, self._clipboard_title_cache.get(url, ""))
+        self._flush_history()
+
     @Slot(str, str)
     def _record_download_url(self, url: str, title: str) -> None:
-        self.history_store.add(url, title)
+        self.history_store.update_title(url, title)
         self._schedule_history_save()
 
     def _schedule_history_save(self) -> None:
@@ -790,6 +881,11 @@ class MainWindow(QMainWindow):
         if self._is_downloading:
             self._request_cancel()
             return
+        if self._manual_download_plan is not None:
+            return
+        if self._clipboard_download_queue:
+            self._start_next_queued_download()
+            return
 
         urls = list(self._pending_urls)
         if not urls:
@@ -798,6 +894,14 @@ class MainWindow(QMainWindow):
                 self._set_status(tr("error.enter_url"), "error")
                 return
             urls = [url]
+
+        if any(classify_url(url) not in (None, "yt") for url in urls):
+            if any(classify_url(url) is None for url in urls):
+                self._set_status(tr("error.invalid_url"), "error")
+                return
+            self._manual_download_plan = {"urls": urls, "next_index": 0, "jobs": [], "media_type": "audio" if self.audio_check.isChecked() else "video"}
+            self._prompt_next_media_job()
+            return
 
         if not self.video_check.isChecked() and not self.audio_check.isChecked():
             self._set_status(tr("error.select_media"), "error")
@@ -814,9 +918,103 @@ class MainWindow(QMainWindow):
             return
 
         quality = self.config.video_quality if media_type == "video" else self.config.audio_quality
+        if any(is_youtube_playlist(url) for url in urls):
+            self._manual_download_plan = {
+                "urls": urls,
+                "resolved": [],
+                "next_index": 0,
+                "media_type": media_type,
+                "quality": quality,
+                "thumbnails": self.config.download_thumbnails,
+            }
+            self._prompt_next_manual_playlist()
+            return
         if not self._pending_urls:
             self.url_entry.clear()
+        self._record_download_attempts(urls)
         self._start_download(urls, media_type, quality, self.config.download_thumbnails)
+
+    def _prompt_next_media_job(self) -> None:
+        plan = self._manual_download_plan
+        index = plan['next_index']
+        if index < len(plan['urls']):
+            self._show_clipboard_download_prompt(plan['urls'][index], manual=True)
+            return
+        jobs = plan['jobs']
+        self._manual_download_plan = None
+        self._record_download_attempts([job['url'] for job in jobs])
+        self._clipboard_download_queue.extend(jobs)
+        self._update_queue_label()
+        self._start_next_queued_download()
+
+    def _resolve_media_job(self, url: str, media_type: str) -> None:
+        plan = self._manual_download_plan
+        original = plan['urls'][plan['next_index']]
+        if url not in (original, youtube_single_video_url(original)):
+            self._manual_download_plan = None
+            return
+        job = self._clipboard_job(url, media_type)
+        if job is None:
+            self._manual_download_plan = None
+            self._set_status(tr('error.invalid_media_type'), 'error')
+            return
+        plan['jobs'].append(job)
+        plan['next_index'] += 1
+        self._prompt_next_media_job()
+
+    def _prompt_next_manual_playlist(self) -> None:
+        """Ask about each playlist in a URL list before starting any download."""
+        plan = self._manual_download_plan
+        if plan is None:
+            return
+        urls = plan["urls"]
+        resolved = plan["resolved"]
+        assert isinstance(urls, list) and isinstance(resolved, list)
+        index = int(plan["next_index"])
+        while index < len(urls):
+            url = str(urls[index])
+            if is_youtube_playlist(url):
+                plan["next_index"] = index
+                self._show_clipboard_download_prompt(
+                    url,
+                    manual=True,
+                    allow_audio_override=all(classify_url(item) == "yt" for item in urls),
+                )
+                return
+            resolved.append(url)
+            index += 1
+        self._manual_download_plan = None
+        if not self._pending_urls:
+            self.url_entry.clear()
+        media_type = str(plan["media_type"])
+        quality = self.config.video_quality if media_type == "video" else self.config.audio_quality
+        self._record_download_attempts(resolved)
+        self._start_download(resolved, media_type, quality, bool(plan["thumbnails"]))
+
+    def _resolve_manual_playlist_choice(self, url: str, media_type: str) -> None:
+        plan = self._manual_download_plan
+        if plan is None:
+            return
+        urls = plan["urls"]
+        resolved = plan["resolved"]
+        assert isinstance(urls, list) and isinstance(resolved, list)
+        index = int(plan["next_index"])
+        original = str(urls[index])
+        # Never accept a URL outside the original user's playlist/video.
+        if url not in {original, youtube_single_video_url(original)}:
+            self._manual_download_plan = None
+            return
+        resolved.append(url)
+        plan["next_index"] = index + 1
+        if len(urls) == 1 or all(classify_url(item) == "yt" for item in urls):
+            plan["media_type"] = media_type
+        self._prompt_next_manual_playlist()
+
+    @Slot()
+    def _on_popup_cancelled(self) -> None:
+        if self._manual_download_plan is not None:
+            self._manual_download_plan = None
+            self._set_status(tr("download.cancelled"), "warning")
 
     def _set_download_controls_enabled(self, enabled: bool) -> None:
         self.open_list_action.setEnabled(enabled)
@@ -829,8 +1027,7 @@ class MainWindow(QMainWindow):
         self.url_entry.setEnabled(enabled)
 
     def _start_download(self, urls: list[str], media_type: str, quality: str, thumbnails: bool) -> None:
-        if self._clipboard_popup is not None:
-            self._clipboard_popup.hide()
+        # An unrelated clipboard confirmation can remain open while the queue advances.
         self._is_downloading = True
         self._cancel_all_requested = False
         self._active_download_urls = set(urls)

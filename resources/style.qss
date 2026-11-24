@@ -154,6 +154,32 @@ QLabel#clipboardPopupUrl {
     color: #9a9aa8;
     font-size: 9pt;
 }
+QLabel#clipboardPopupPlaylistNotice {
+    color: #ffb36e;
+    font-size: 9pt;
+    font-weight: 700;
+}
+QLabel#clipboardPopupVideoUrl {
+    color: #9a9aa8;
+    font-size: 8pt;
+}
+QRadioButton#clipboardPopupScopeOption {
+    color: #e6e6ec;
+    spacing: 8px;
+    font-size: 9pt;
+    min-height: 23px;
+}
+QRadioButton#clipboardPopupScopeOption::indicator {
+    width: 17px;
+    height: 17px;
+    border-radius: 9px;
+    border: 1px solid #4a4a56;
+    background: #14141a;
+}
+QRadioButton#clipboardPopupScopeOption::indicator:checked {
+    background-color: #f40000;
+    border-color: #ff3b3b;
+}
 QLabel#clipboardPopupMediaLabel {
     color: #d2d2da;
     font-size: 9pt;

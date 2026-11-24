@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -8,7 +10,8 @@ from typing import Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
 from .i18n import tr
-from .platforms import classify_url
+from .platforms import classify_url, social_image_target, facebook_media_kind, facebook_photo_url, media_kind
+from .image_conversion import IMAGE_FORMATS, convert_image, publish_image
 
 class DownloadCancelled(Exception):
     """Raised when the user requests cancellation."""
@@ -82,7 +85,7 @@ def fetch_url_title(url: str, timeout: float = 6.0) -> str:
     platform-specific fallback rather than exposing the raw URL.
     """
     url = str(url or "").strip()
-    if classify_url(url) is None:
+    if classify_url(url) is None or facebook_media_kind(url) == "image":
         return ""
 
     try:
@@ -143,11 +146,12 @@ def _get_gallery_runtime():
         class GalleryMediaJob(GalleryDownloadJob):  # type: ignore[misc, valid-type]
             """Single-post gallery job with cancellation and media filtering."""
 
-            def __init__(self, url, parent=None, cancel_event=None, progress_callback=None, media_mode="images"):
+            def __init__(self, url, parent=None, cancel_event=None, progress_callback=None, media_mode="images", image_index=None):
                 self._glean_cancel_event = cancel_event or getattr(parent, "_glean_cancel_event", None)
                 self._glean_progress_callback = progress_callback or getattr(parent, "_glean_progress_callback", None)
                 self._glean_media_mode = getattr(parent, "_glean_media_mode", media_mode)
-                self._glean_stats = getattr(parent, "_glean_stats", {"images": 0, "videos": 0, "title": ""})
+                self._glean_image_index = getattr(parent, "_glean_image_index", image_index)
+                self._glean_stats = getattr(parent, "_glean_stats", {"images": 0, "videos": 0, "title": "", "paths": []})
                 super().__init__(url, parent)
 
             def _check_glean_cancelled(self) -> None:
@@ -168,10 +172,18 @@ def _get_gallery_runtime():
                 media_kind = "images" if extension in _IMAGE_EXTENSIONS else "videos" if extension in _VIDEO_EXTENSIONS else ""
                 if not media_kind or (self._glean_media_mode == "images" and media_kind != "images"):
                     return
+                if self._glean_image_index is not None:
+                    position = kwdict.get("num")
+                    if position is None and str(kwdict.get("count")) == "1":
+                        position = 1
+                    if str(position) != self._glean_image_index:
+                        return
                 super().handle_url(url, kwdict)
                 final_path = getattr(self.pathfmt, "path", None) if self.pathfmt is not None else None
                 if final_path and os.path.isfile(final_path):
                     self._glean_stats[media_kind] = int(self._glean_stats.get(media_kind, 0)) + 1
+                    if media_kind == "images":
+                        self._glean_stats.setdefault("paths", []).append(final_path)
                     if self._glean_progress_callback:
                         total = int(self._glean_stats.get("images", 0)) + int(self._glean_stats.get("videos", 0))
                         self._glean_progress_callback({"status": "gallery", "gallery_item": total})
@@ -333,6 +345,8 @@ class GleanDownloader:
             return f"X post {parts[-1]}"
         if platform == "tt" and parts:
             return f"TikTok video {parts[-1]}"
+        if platform == "fb":
+            return "Facebook photo" if facebook_media_kind(url) == "image" else "Facebook video"
         if platform == "yt":
             return "YouTube"
         return "Download"
@@ -427,7 +441,7 @@ class GleanDownloader:
         self._playlist_mode = is_playlist
         self._aggregate_mode = is_playlist or is_social
 
-        if media_type == "audio" and platform != "yt":
+        if media_type == "audio" and media_kind(url) == "image":
             self.error_audio()
         if media_type not in {"audio", "video"}:
             raise ValueError(tr("error.invalid_media_type"))
@@ -444,7 +458,10 @@ class GleanDownloader:
             opts["ignoreerrors"] = True
 
         if is_playlist:
-            outtmpl = os.path.join(self.download_dir, "%(playlist_title)s", "%(title)s.%(ext)s")
+            outtmpl = os.path.join(
+                self.download_dir, "%(playlist_title,playlist|Playlist).100B [%(playlist_id|unknown)s]",
+                "%(title).150B [%(id)s].%(ext)s",
+            )
         elif platform == "yt":
             outtmpl = os.path.join(self.download_dir, "%(title)s.%(ext)s")
         else:
@@ -502,6 +519,20 @@ class GleanDownloader:
                 return 1
         return 0
 
+    @classmethod
+    def _count_audio_entries(cls, info) -> int:
+        if not isinstance(info, dict):
+            return 0
+        entries = info.get("entries")
+        if entries is not None:
+            try:
+                return sum(cls._count_audio_entries(entry) for entry in entries)
+            except TypeError:
+                return 0
+        requested = info.get("requested_downloads") or info.get("requested_formats")
+        candidates = [info] + (requested if isinstance(requested, list) else [])
+        return int(any(isinstance(item, dict) and str(item.get("acodec") or "").lower() not in ("", "none") for item in candidates))
+
     def _run_ytdlp(
         self,
         url: str,
@@ -531,7 +562,9 @@ class GleanDownloader:
                     self._remember_history_title(info.get("title") or info.get("playlist_title") or self._last_playlist_title)
                 else:
                     self._remember_history_title(info.get("title") or self._last_announced_title)
-            count = self._count_video_entries(info) if media_type == "video" else (1 if info else 0)
+            count = self._count_video_entries(info) if media_type == "video" else self._count_audio_entries(info)
+            if not count and emit_final:
+                raise RuntimeError(tr("error.no_media_found"))
             if emit_final:
                 self._progress({"status": "finalized", "progress": 1.0})
                 self._message(tr("download.finalized"))
@@ -560,9 +593,11 @@ class GleanDownloader:
         with _GALLERY_CONFIG_LOCK:
             runtime_config.set(("extractor",), "base-directory", self.download_dir)
             runtime_config.set(("extractor",), "path-restrict", "windows")
-            for category in ("instagram", "tiktok", "twitter"):
+            runtime_config.set(("extractor",), "directory", [])
+            for category in ("instagram", "tiktok", "twitter", "facebook"):
                 runtime_config.set(("extractor", category), "base-directory", self.download_dir)
                 runtime_config.set(("extractor", category), "path-restrict", "windows")
+                runtime_config.set(("extractor", category), "directory", [])
 
             self.validate_url(url)
 
@@ -576,13 +611,22 @@ class GleanDownloader:
             runtime_config.set(("extractor", "tiktok"), "audio", False)
             runtime_config.set(("extractor", "tiktok"), "covers", False)
 
+            runtime_config.set(("extractor", "facebook"), "videos", False)
+            runtime_config.set(("extractor", "facebook"), "author-followups", False)
+            target = social_image_target(url)
+            gallery_url, index = target if target else (url.strip(), None)
+            if facebook_media_kind(url) == "image":
+                gallery_url = facebook_photo_url(url)
             try:
                 job = job_class(
-                    url.strip(),
+                    gallery_url,
                     cancel_event=self.cancel_event,
                     progress_callback=self._progress,
                     media_mode=media_mode,
+                    image_index=index,
                 )
+                # Track completed source paths even if extraction later fails or is cancelled.
+                self._gallery_paths = job._glean_stats.setdefault("paths", [])
                 status = job.run()
             except BaseException as exc:
                 if self.cancel_event.is_set():
@@ -591,9 +635,11 @@ class GleanDownloader:
                     raise DownloadCancelled(tr("download.cancelled")) from exc
                 raise
 
+        self._check_cancelled()
         image_count = int(job._glean_stats.get("images", 0))
         video_count = int(job._glean_stats.get("videos", 0))
         self._remember_history_title(job._glean_stats.get("title", ""))
+        self._gallery_paths = job._glean_stats.get("paths", [])
         if status and image_count == 0 and video_count == 0:
             raise RuntimeError(tr("error.gallery_download_failed"))
         return image_count, video_count
@@ -601,6 +647,14 @@ class GleanDownloader:
     def _run_social_video(self, url: str, quality: str, thumbnails: bool) -> None:
         self.validate_url(url)
         self.last_title = ""
+        if social_image_target(url):
+            image_count, _ = self._download_social_gallery(url, media_mode="images")
+            self._check_cancelled()
+            if not image_count:
+                raise RuntimeError(tr("error.no_media_found"))
+            self._progress({"status": "finalized", "progress": 1.0})
+            self._message(tr("download.social_finalized", images=image_count, videos=0))
+            return
         image_count = 0
         video_count = 0
         gallery_error: Exception | None = None
@@ -648,27 +702,39 @@ class GleanDownloader:
         raise RuntimeError(tr("error.no_media_found"))
 
     def download_audio(self, url: str, quality: str, thumbnails: bool, output_dir: str | None = None) -> None:
-        if self.validate_url(url) != "yt":
+        self.validate_url(url)
+        if media_kind(url) == "image":
             self.error_audio()
         self._run_ytdlp(url, "audio", quality, thumbnails, output_dir)
 
-    def download_video(self, url: str, quality: str, thumbnails: bool, output_dir: str | None = None) -> None:
+    def _dispatch_video(self, url: str, quality: str, thumbnails: bool) -> None:
         platform = self.validate_url(url)
-        if output_dir:
-            original_dir = self.download_dir
-            self.set_download_dir(output_dir)
-            try:
-                if platform in self.SOCIAL_PLATFORMS:
-                    self._run_social_video(url, quality, thumbnails)
-                else:
-                    self._run_ytdlp(url, "video", quality, thumbnails)
-            finally:
-                self.download_dir = original_dir
-            return
-        if platform in self.SOCIAL_PLATFORMS:
+        if platform == "fb":
+            if facebook_media_kind(url) == "image":
+                count, _ = self._download_social_gallery(url, media_mode="images")
+                self._check_cancelled()
+                if not count:
+                    raise RuntimeError(tr("error.no_media_found"))
+            else:
+                count = self._run_ytdlp(url, "video", quality, thumbnails, emit_final=False)
+                self._check_cancelled()
+                if not count:
+                    raise RuntimeError(tr("error.no_media_found"))
+            self._progress({"status": "finalized", "progress": 1.0})
+            self._message(tr("download.finalized"))
+        elif platform in self.SOCIAL_PLATFORMS:
             self._run_social_video(url, quality, thumbnails)
         else:
             self._run_ytdlp(url, "video", quality, thumbnails)
+
+    def download_video(self, url: str, quality: str, thumbnails: bool, output_dir: str | None = None) -> None:
+        original_dir = self.download_dir
+        try:
+            if output_dir:
+                self.set_download_dir(output_dir)
+            self._dispatch_video(url, quality, thumbnails)
+        finally:
+            self.download_dir = original_dir
 
     def download_playlist(self, url: str, quality: str, thumbnails: bool, media_type: str) -> None:
         if self.validate_url(url) != "yt":
@@ -681,10 +747,70 @@ class GleanDownloader:
             info = ydl.extract_info(url, download=False)
         return str((info or {}).get("title") or tr("download.playlist_default"))
 
+    def _download_converted_images(self, url: str, quality: str) -> None:
+        # Stage this request separately: gallery-dl may skip an existing file,
+        # which must never be removed or changed by a subsequent conversion.
+        destination = Path(self.download_dir).resolve()
+        staging = Path(tempfile.mkdtemp(prefix=".glean-image-", dir=destination))
+        completed = set()
+        self._gallery_paths = []
+        try:
+            try:
+                self.download_dir = str(staging)
+                count, _ = self._download_social_gallery(url, media_mode="images")
+            finally:
+                self.download_dir = str(destination)
+            if not count or not self._gallery_paths:
+                raise RuntimeError(tr("error.no_media_found"))
+            for path in dict.fromkeys(self._gallery_paths):
+                self._check_cancelled()
+                source = Path(path).resolve()
+                if not source.is_relative_to(staging) or not source.is_file():
+                    raise RuntimeError(tr("error.no_media_found"))
+                converted = convert_image(source, quality)
+                self._check_cancelled()
+                publish_image(converted, destination, extension=quality)
+                completed.add(source)
+        except BaseException:
+            # Preserve completed downloads whose conversion did not succeed.
+            # If recovery itself fails, leave staging intact for manual recovery.
+            try:
+                for path in dict.fromkeys(self._gallery_paths):
+                    source = Path(path).resolve()
+                    if source not in completed and source.is_relative_to(staging) and source.is_file():
+                        publish_image(source, destination)
+                        completed.add(source)
+            except Exception as recovery_error:
+                raise RuntimeError(f"{recovery_error} ({staging})") from recovery_error
+            shutil.rmtree(staging)
+            raise
+        else:
+            shutil.rmtree(staging)
+
     def download(self, url: str, media_type: str, quality: str, thumbnails: bool) -> None:
         self.last_title = ""
         platform = self.validate_url(url)
-        if platform == "yt" and self.is_playlist(url):
+        if media_type == "image":
+            if quality not in IMAGE_FORMATS or media_kind(url) == "video":
+                raise ValueError(tr("error.invalid_media_type"))
+            if quality == "original":
+                self._gallery_paths = []
+                count, _ = self._download_social_gallery(url, media_mode="images")
+                if not count:
+                    raise RuntimeError(tr("error.no_media_found"))
+            else:
+                self._download_converted_images(url, quality)
+            self._check_cancelled()
+            self._progress({"status": "finalized", "progress": 1.0})
+            self._message(tr("download.finalized"))
+        elif media_type == "video_only":
+            if media_kind(url) == "image":
+                raise ValueError(tr("error.invalid_media_type"))
+            if not self._run_ytdlp(url, "video", quality, thumbnails, emit_final=False):
+                raise RuntimeError(tr("error.no_media_found"))
+            self._progress({"status": "finalized", "progress": 1.0})
+            self._message(tr("download.finalized"))
+        elif platform == "yt" and self.is_playlist(url):
             self.download_playlist(url, quality, thumbnails, media_type)
         elif media_type == "audio":
             self.download_audio(url, quality, thumbnails)
@@ -692,3 +818,37 @@ class GleanDownloader:
             self.download_video(url, quality, thumbnails)
         else:
             raise ValueError(tr("error.invalid_media_type"))
+
+
+def probe_media_kind(url: str) -> str:
+    """Inspect gallery metadata without downloading files; fail closed to unknown."""
+    kind = media_kind(url)
+    if kind != 'unknown':
+        return kind
+    if not _GALLERY_CONFIG_LOCK.acquire(blocking=False):
+        return 'unknown'
+    try:
+        from gallery_dl import extractor, config
+        from gallery_dl.extractor.message import Message
+        for category in ('instagram', 'twitter'):
+            config.set(('extractor', category), 'videos', True)
+        ext = extractor.find(url)
+        if ext is None:
+            return 'unknown'
+        kinds = set()
+        for message in ext:
+            if message[0] == Message.Queue:
+                return 'unknown'
+            if message[0] != Message.Url:
+                continue
+            _, link, data = message
+            suffix = str(data.get('extension') or _extension_from_url(link)).lower().lstrip('.')
+            if suffix in _IMAGE_EXTENSIONS: kinds.add('image')
+            elif suffix in _VIDEO_EXTENSIONS: kinds.add('video')
+            else: return 'unknown'
+            if len(kinds) > 1: return 'mixed'
+        return next(iter(kinds)) if kinds else 'unknown'
+    except Exception:
+        return 'unknown'
+    finally:
+        _GALLERY_CONFIG_LOCK.release()

@@ -69,11 +69,11 @@ class BackendValidationTests(unittest.TestCase):
         self.assertFalse(is_youtube_playlist("https://www.youtube.com/watch?v=x"))
 
 
-    def test_audio_is_youtube_only(self):
+    def test_audio_rejects_explicit_images(self):
         for url in (
-            "https://www.instagram.com/p/test/",
-            "https://www.tiktok.com/@u/video/1",
-            "https://x.com/u/status/1",
+            "https://www.instagram.com/p/test/?img_index=1",
+            "https://www.facebook.com/photo?fbid=1",
+            "https://x.com/u/status/1/photo/1",
         ):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 self.downloader._build_options(url, "audio", "Alta", False)
@@ -354,7 +354,7 @@ class UiSourceTests(unittest.TestCase):
         self.assertIn("self.video_radio = QRadioButton()", popup)
         self.assertIn("self.audio_radio = QRadioButton()", popup)
         self.assertIn("self.download_requested.emit(url, media_type)", popup)
-        self.assertIn("allow_audio = platform_key == \"yt\"", self.source)
+        self.assertIn("allow_audio = media_kind(url) != \"image\"", self.source)
         self.assertIn("job = self._clipboard_job(url, media_type)", self.source)
         self.assertIn('tr("clipboard.queue_prompt")', popup)
         self.assertIn("Qt.WindowType.WindowStaysOnTopHint", popup)
@@ -452,8 +452,21 @@ class PackagingTests(unittest.TestCase):
     def test_identity(self):
         self.assertEqual(APP_NAME, "Glean")
         self.assertEqual(APP_AUTHOR, "Nostrand")
-        self.assertEqual(APP_VERSION, "2.0.0")
+        self.assertEqual(APP_VERSION, "2.0.1")
 
+
+    def test_release_version_metadata_matches(self):
+        from app.version import APP_VERSION_WIN
+        self.assertEqual(APP_VERSION_WIN, APP_VERSION + ".0")
+        resource = (ROOT / "version.txt").read_text(encoding="utf-8")
+        expected_tuple = tuple(map(int, APP_VERSION_WIN.split(".")))
+        for key in ("filevers", "prodvers"):
+            self.assertIn(f"{key}={expected_tuple}", resource)
+        for key in ("FileVersion", "ProductVersion"):
+            self.assertIn(f"StringStruct(u'{key}', u'{APP_VERSION_WIN}')", resource)
+        installer = (ROOT / "Glean.iss").read_text(encoding="utf-8")
+        self.assertIn(f'#define MyAppVersion "{APP_VERSION}"', installer)
+        self.assertIn(f'OutputBaseFilename=Glean_{APP_VERSION}_Setup', installer)
 
     def test_legacy_product_identity_is_fully_removed(self):
         legacy_tokens = ("YouTube" + " Downloader", "YouTube" + "Downloader", "Youtube" + " Downloader")
